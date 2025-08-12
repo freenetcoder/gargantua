@@ -1,7 +1,7 @@
 # Gargantua Protocol: Zero-Knowledge Anonymous Payments on Solana
 
 <div align="center">
-  <img src="https://images.pexels.com/photos/1181677/pexels-photo-1181677.jpeg?auto=compress&cs=tinysrgb&w=800" alt="Gargantua Protocol" width="600"/>
+  <img src="https://raw.githubusercontent.com/freenetcoder/gargantua/refs/heads/main/gg.png" alt="Gargantua Protocol" width="600"/>
   
   [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
   [![Solana](https://img.shields.io/badge/Solana-Compatible-green.svg)](https://solana.com)
