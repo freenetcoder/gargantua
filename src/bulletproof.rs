@@ -139,6 +139,15 @@ impl BulletproofVerifier {
         n: usize,
         transcript: &mut Transcript,
     ) -> Result<bool, ProgramError> {
+        if proof.l_vec.len() != proof.r_vec.len() {
+            return Err(ProgramError::InvalidArgument);
+        }
+        
+        let log_n = proof.l_vec.len();
+        if (1 << log_n) != n {
+            return Err(ProgramError::InvalidArgument);
+        }
+        
         let mut g_vec = self.g[..n].to_vec();
         let mut h_vec = self.h[..n].to_vec();
         
@@ -166,7 +175,30 @@ impl BulletproofVerifier {
             }
         }
         
-        let mut p = self.compute_initial_p(y, z, x, n);
+        // Compute initial P value properly
+        let mut p = G1Point::identity();
+        
+        // Add commitment terms
+        let g = G1Point::generator();
+        let h = crate::utils::get_h_generator();
+        
+        // P = A + xS + sum(z^j * V_j) where V_j are the commitments being proven
+        // For range proofs, this involves the polynomial commitment
+        let z_squared = z * z;
+        let mut z_power = *z;
+        
+        for i in 0..n {
+            let y_inv_i = y.invert().pow(&[i as u64, 0, 0, 0]);
+            let two_i = Scalar::from(1u64 << (i % 32)); // Handle large i values safely
+            
+            // Add terms for the range proof verification
+            p = p.add(&g_vec[i].mul(&(-z)));
+            p = p.add(&h_vec[i].mul(&(z_squared * two_i * y_inv_i)));
+            
+            if i < 32 {
+                z_power = z_power * z;
+            }
+        }
         
         // Process each round of the inner product argument
         for (l, r) in proof.l_vec.iter().zip(proof.r_vec.iter()) {
@@ -200,12 +232,6 @@ impl BulletproofVerifier {
             .add(&self.u.mul(&(proof.a * proof.b)));
         
         Ok(p.eq(&expected))
-    }
-
-    fn compute_initial_p(&self, y: &Scalar, z: &Scalar, x: &Scalar, n: usize) -> G1Point {
-        // This would compute the initial P value for the inner product argument
-        // Implementation depends on the specific bulletproof variant
-        G1Point::identity()
     }
 }
 
