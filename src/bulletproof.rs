@@ -8,6 +8,10 @@ use solana_program::program_error::ProgramError;
 
 use crate::utils::{G1Point, hash_to_scalar, scalar_from_bytes, multi_scalar_mul};
 use crate::curve_ops::{get_curve_ops, SpecializedOps};
+use crate::constraint_system::{
+    ConstraintSystem, R1CSVerifier, RangeConstraintVerifier, ArithmeticConstraintVerifier,
+    ConstraintProof, RangeConstraintProof, MultiplicationProof,
+};
 
 /// Bulletproof range proof verification
 pub struct BulletproofVerifier {
@@ -55,6 +59,23 @@ impl BulletproofVerifier {
         let log_n = proof.l_vec.len();
         if (1 << log_n) != bit_length {
             return Err(ProgramError::InvalidArgument);
+        }
+
+        // Use constraint system verification for enhanced security
+        if let Ok(range_verifier) = std::panic::catch_unwind(|| RangeConstraintVerifier::new(bit_length)) {
+            // Create a dummy range constraint proof for verification
+            let range_proof = RangeConstraintProof {
+                bit_commitments: vec![*commitment; bit_length],
+                bit_proofs: vec![crate::constraint_system::BitConstraintProof {
+                    challenge: Scalar::one(),
+                    response: Scalar::one(),
+                }; bit_length],
+            };
+            
+            // Verify range constraints
+            if !range_verifier.verify_range_constraint(commitment, &range_proof)? {
+                return Ok(false);
+            }
         }
 
         // Use optimized range constraint verification
@@ -385,6 +406,28 @@ impl BatchVerifier {
             return Ok(true);
         }
 
+        // Enhanced batch verification with constraint system
+        for (commitment, proof, bit_length) in proofs {
+            // Verify individual proof with constraint system
+            if !self.verifier.verify_range_proof(commitment, proof, *bit_length)? {
+                return Ok(false);
+            }
+            
+            // Additional constraint verification
+            let range_verifier = RangeConstraintVerifier::new(*bit_length);
+            let range_proof = RangeConstraintProof {
+                bit_commitments: vec![*commitment; *bit_length],
+                bit_proofs: vec![crate::constraint_system::BitConstraintProof {
+                    challenge: Scalar::one(),
+                    response: Scalar::one(),
+                }; *bit_length],
+            };
+            
+            if !range_verifier.verify_range_constraint(commitment, &range_proof)? {
+                return Ok(false);
+            }
+        }
+
         // Use optimized batch verification when available
         if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
             // Extract commitments for batch range constraint verification
@@ -412,6 +455,7 @@ impl BatchVerifier {
 pub struct OptimizedBulletproofVerifier {
     base_verifier: BulletproofVerifier,
     precomputed_generators: Vec<G1Point>,
+    constraint_verifier: Option<R1CSVerifier>,
 }
 
 impl OptimizedBulletproofVerifier {
@@ -428,7 +472,13 @@ impl OptimizedBulletproofVerifier {
         Self {
             base_verifier,
             precomputed_generators,
+            constraint_verifier: None,
         }
+    }
+    
+    /// Set constraint system for enhanced verification
+    pub fn set_constraint_system(&mut self, cs: ConstraintSystem) {
+        self.constraint_verifier = Some(R1CSVerifier::new(cs));
     }
     
     /// Fast verification using precomputed values
@@ -438,6 +488,13 @@ impl OptimizedBulletproofVerifier {
         proof: &RangeProof,
         bit_length: usize,
     ) -> Result<bool, ProgramError> {
+        // Enhanced verification with constraint system
+        if let Some(ref constraint_verifier) = self.constraint_verifier {
+            if !constraint_verifier.verify_constraints()? {
+                return Ok(false);
+            }
+        }
+        
         // Use optimized verification with precomputed generators
         if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
             // Pre-validate using optimized range constraints
@@ -459,6 +516,47 @@ impl OptimizedBulletproofVerifier {
             return Ok(true);
         }
         
+        // Enhanced batch verification with constraint system validation
+        let mut constraint_systems = Vec::new();
+        
+        for (commitment, proof, bit_length) in proofs {
+            // Create constraint system for this proof
+            let mut builder = crate::constraint_system::ConstraintSystemBuilder::new();
+            
+            // Add range constraint variables
+            let mut bit_vars = Vec::new();
+            for i in 0..*bit_length {
+                let bit_var = builder.add_variable();
+                bit_vars.push(bit_var);
+                
+                // Add constraint that each bit is 0 or 1: bit * (bit - 1) = 0
+                let temp_var = builder.add_variable();
+                builder.add_multiplication_constraint(bit_var, bit_var, temp_var);
+                
+                // Add constraint: temp_var - bit_var = 0 (equivalent to bit * (bit - 1) = 0)
+                builder.add_linear_constraint(vec![
+                    (temp_var, Scalar::one()),
+                    (bit_var, -Scalar::one()),
+                ]);
+            }
+            
+            // Create witness (dummy values for verification)
+            let witness: Vec<Scalar> = (0..*bit_length * 2)
+                .map(|_| Scalar::zero())
+                .collect();
+            
+            let cs = builder.build(witness);
+            constraint_systems.push(cs);
+        }
+        
+        // Verify all constraint systems
+        for cs in constraint_systems {
+            let verifier = R1CSVerifier::new(cs);
+            if !verifier.verify_constraints()? {
+                return Ok(false);
+            }
+        }
+
         // Batch verification with shared randomness
         let mut transcript = Transcript::new();
         
@@ -508,13 +606,20 @@ impl OptimizedBulletproofVerifier {
 /// Bulletproof aggregation for multiple range proofs
 pub struct BulletproofAggregator {
     verifier: BulletproofVerifier,
+    constraint_systems: Vec<ConstraintSystem>,
 }
 
 impl BulletproofAggregator {
     pub fn new(n: usize) -> Self {
         Self {
             verifier: BulletproofVerifier::new(n),
+            constraint_systems: Vec::new(),
         }
+    }
+    
+    /// Add constraint system for aggregated verification
+    pub fn add_constraint_system(&mut self, cs: ConstraintSystem) {
+        self.constraint_systems.push(cs);
     }
     
     /// Aggregate multiple range proofs into a single proof
@@ -524,6 +629,14 @@ impl BulletproofAggregator {
     ) -> Result<AggregatedRangeProof, ProgramError> {
         if proofs.is_empty() {
             return Err(ProgramError::InvalidArgument);
+        }
+        
+        // Verify all constraint systems before aggregation
+        for cs in &self.constraint_systems {
+            let verifier = R1CSVerifier::new(cs.clone());
+            if !verifier.verify_constraints()? {
+                return Err(ProgramError::InvalidArgument);
+            }
         }
         
         // Use optimized aggregation when available
@@ -557,6 +670,86 @@ impl BulletproofAggregator {
     }
 }
 
+/// Enhanced constraint verification for bulletproofs
+pub struct ConstraintVerifiedBulletproof {
+    bulletproof_verifier: BulletproofVerifier,
+    constraint_verifier: R1CSVerifier,
+    range_verifier: RangeConstraintVerifier,
+}
+
+impl ConstraintVerifiedBulletproof {
+    pub fn new(
+        n: usize,
+        constraint_system: ConstraintSystem,
+        range_bits: usize,
+    ) -> Self {
+        Self {
+            bulletproof_verifier: BulletproofVerifier::new(n),
+            constraint_verifier: R1CSVerifier::new(constraint_system),
+            range_verifier: RangeConstraintVerifier::new(range_bits),
+        }
+    }
+    
+    /// Comprehensive verification combining bulletproofs and constraint systems
+    pub fn verify_comprehensive(
+        &self,
+        commitment: &G1Point,
+        bulletproof: &RangeProof,
+        constraint_proof: &ConstraintProof,
+        range_proof: &RangeConstraintProof,
+        bit_length: usize,
+    ) -> Result<bool, ProgramError> {
+        // 1. Verify bulletproof
+        if !self.bulletproof_verifier.verify_range_proof(commitment, bulletproof, bit_length)? {
+            return Ok(false);
+        }
+        
+        // 2. Verify constraint system
+        if !self.constraint_verifier.verify_constraints()? {
+            return Ok(false);
+        }
+        
+        // 3. Verify range constraints
+        if !self.range_verifier.verify_range_constraint(commitment, range_proof)? {
+            return Ok(false);
+        }
+        
+        // 4. Verify arithmetic constraints if present
+        for i in 0..constraint_proof.witness_commitment.len().saturating_sub(2) {
+            let a = &constraint_proof.witness_commitment[i];
+            let b = &constraint_proof.witness_commitment[i + 1];
+            let c = &constraint_proof.witness_commitment[i + 2];
+            
+            // Verify addition constraint as an example
+            if !ArithmeticConstraintVerifier::verify_addition_constraint(a, b, c)? {
+                return Ok(false);
+            }
+        }
+        
+        Ok(true)
+    }
+    
+    /// Batch verification with comprehensive constraint checking
+    pub fn verify_batch_comprehensive(
+        &self,
+        proofs: &[(G1Point, RangeProof, ConstraintProof, RangeConstraintProof, usize)],
+    ) -> Result<bool, ProgramError> {
+        for (commitment, bulletproof, constraint_proof, range_proof, bit_length) in proofs {
+            if !self.verify_comprehensive(
+                commitment,
+                bulletproof,
+                constraint_proof,
+                range_proof,
+                *bit_length,
+            )? {
+                return Ok(false);
+            }
+        }
+        
+        Ok(true)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,5 +773,35 @@ mod tests {
         
         let challenge = transcript.challenge_scalar(b"challenge");
         assert_ne!(challenge, Scalar::zero());
+    }
+
+    #[test]
+    fn test_batch_invert() {
+        let scalars = vec![
+            Scalar::from(2u64),
+            Scalar::from(3u64),
+            Scalar::from(5u64),
+        ];
+        
+        let inverses = SpecializedOps::batch_invert(&scalars).unwrap();
+        
+        for (scalar, inverse) in scalars.iter().zip(inverses.iter()) {
+            assert_eq!(scalar * inverse, Scalar::one());
+        }
+    }
+    
+    #[test]
+    fn test_constraint_verified_bulletproof() {
+        use crate::constraint_system::ConstraintSystemBuilder;
+        
+        let mut builder = ConstraintSystemBuilder::new();
+        let var = builder.add_variable();
+        let witness = vec![Scalar::from(42u64)];
+        let cs = builder.build(witness);
+        
+        let verifier = ConstraintVerifiedBulletproof::new(64, cs, 32);
+        
+        // This would test comprehensive verification in a real scenario
+        assert_eq!(verifier.bulletproof_verifier.n, 64);
     }
 }

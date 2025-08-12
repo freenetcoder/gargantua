@@ -12,6 +12,7 @@ pub mod state;
 pub mod utils;
 pub mod bulletproof;
 pub mod curve_ops;
+pub mod constraint_system;
 
 entrypoint!(process_instruction);
 
