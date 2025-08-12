@@ -6,7 +6,6 @@
   [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
   [![Solana](https://img.shields.io/badge/Solana-Compatible-green.svg)](https://solana.com)
   [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org)
-  [![Security](https://img.shields.io/badge/Security-Audited-brightgreen.svg)](#security)
 </div>
 
 ## 🌌 Overview
@@ -177,7 +176,6 @@ async fn main() -> Result<()> {
 - [**Protocol Specification**](./docs/PROTOCOL.md) - Technical protocol details
 - [**Security Analysis**](./docs/SECURITY.md) - Cryptographic security proofs
 - [**Integration Guide**](./docs/INTEGRATION.md) - How to integrate Gargantua
-- [**Examples**](./examples/) - Code examples and tutorials
 
 ## 🔐 Security
 
