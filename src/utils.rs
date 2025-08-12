@@ -155,3 +155,64 @@ pub fn verify_schnorr_signature(
     
     computed_challenge == *challenge
 }
+
+/// Multi-scalar multiplication for efficient bulletproof verification
+pub fn multi_scalar_mul(scalars: &[Scalar], points: &[G1Point]) -> G1Point {
+    assert_eq!(scalars.len(), points.len());
+    
+    let mut result = G1Point::identity();
+    for (scalar, point) in scalars.iter().zip(points.iter()) {
+        result = result.add(&point.mul(scalar));
+    }
+    result
+}
+
+/// Compute inner product of two scalar vectors
+pub fn inner_product(a: &[Scalar], b: &[Scalar]) -> Scalar {
+    assert_eq!(a.len(), b.len());
+    
+    let mut result = Scalar::zero();
+    for (ai, bi) in a.iter().zip(b.iter()) {
+        result += ai * bi;
+    }
+    result
+}
+
+/// Generate powers of a scalar: [1, x, x^2, ..., x^(n-1)]
+pub fn scalar_powers(x: &Scalar, n: usize) -> Vec<Scalar> {
+    let mut powers = Vec::with_capacity(n);
+    let mut current = Scalar::one();
+    
+    for _ in 0..n {
+        powers.push(current);
+        current *= x;
+    }
+    
+    powers
+}
+
+/// Hadamard product of two scalar vectors
+pub fn hadamard_product(a: &[Scalar], b: &[Scalar]) -> Vec<Scalar> {
+    assert_eq!(a.len(), b.len());
+    
+    a.iter().zip(b.iter()).map(|(ai, bi)| ai * bi).collect()
+}
+
+/// Vector addition for scalars
+pub fn vector_add(a: &[Scalar], b: &[Scalar]) -> Vec<Scalar> {
+    assert_eq!(a.len(), b.len());
+    
+    a.iter().zip(b.iter()).map(|(ai, bi)| ai + bi).collect()
+}
+
+/// Vector subtraction for scalars
+pub fn vector_sub(a: &[Scalar], b: &[Scalar]) -> Vec<Scalar> {
+    assert_eq!(a.len(), b.len());
+    
+    a.iter().zip(b.iter()).map(|(ai, bi)| ai - bi).collect()
+}
+
+/// Scalar multiplication of a vector
+pub fn vector_scalar_mul(v: &[Scalar], s: &Scalar) -> Vec<Scalar> {
+    v.iter().map(|vi| vi * s).collect()
+}

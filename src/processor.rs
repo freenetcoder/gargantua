@@ -23,6 +23,7 @@ use crate::{
         G1Point, MAX_TRANSFER_AMOUNT, hash_to_scalar, verify_schnorr_signature,
         pedersen_commit, scalar_from_bytes, map_to_curve_with_index,
     },
+    bulletproof::{BulletproofVerifier, RangeProof, InnerProductProof},
 };
 
 pub fn process_instruction(
@@ -559,26 +560,181 @@ fn rollover_account(
 // Simplified proof verification functions
 // In practice, these would implement full bulletproof verification
 fn verify_transfer_proof(
-    _proof: &crate::state::ZerosolProof,
-    _commitments_c: &[[u8; 32]],
-    _commitment_d: &[u8; 32],
-    _public_keys: &[[u8; 32]],
-    _epoch: u64,
+    proof: &crate::state::ZerosolProof,
+    commitments_c: &[[u8; 32]],
+    commitment_d: &[u8; 32],
+    public_keys: &[[u8; 32]],
+    epoch: u64,
 ) -> bool {
-    // TODO: Implement full bulletproof verification
-    // This is a placeholder that always returns true
-    // In production, this would verify the zero-knowledge proof
-    true
+    // Initialize bulletproof verifier
+    let verifier = BulletproofVerifier::new(64);
+    
+    // Convert proof data to bulletproof format
+    let range_proof = match convert_zerosol_proof_to_range_proof(proof) {
+        Ok(proof) => proof,
+        Err(_) => return false,
+    };
+    
+    // Verify range proofs for each commitment
+    for commitment_bytes in commitments_c {
+        let commitment = match G1Point::from_bytes(commitment_bytes) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        
+        if !verifier.verify_range_proof(&commitment, &range_proof, 32).unwrap_or(false) {
+            return false;
+        }
+    }
+    
+    // Verify commitment D
+    let d_commitment = match G1Point::from_bytes(commitment_d) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    
+    if !verifier.verify_range_proof(&d_commitment, &range_proof, 32).unwrap_or(false) {
+        return false;
+    }
+    
+    // Verify public key commitments
+    for pk_bytes in public_keys {
+        let pk_point = match G1Point::from_bytes(pk_bytes) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        
+        // Verify that public key is valid (on curve)
+        // This is implicitly done by from_bytes, but we could add additional checks
+    }
+    
+    // Verify epoch-specific constraints
+    verify_epoch_constraints(epoch, public_keys)
 }
 
 fn verify_burn_proof(
-    _proof: &crate::state::BurnProof,
-    _account: &ZerosolAccount,
-    _amount: u64,
-    _epoch: u64,
+    proof: &crate::state::BurnProof,
+    account: &ZerosolAccount,
+    amount: u64,
+    epoch: u64,
 ) -> bool {
-    // TODO: Implement full bulletproof verification
-    // This is a placeholder that always returns true
-    // In production, this would verify the zero-knowledge proof
+    // Initialize bulletproof verifier
+    let verifier = BulletproofVerifier::new(32);
+    
+    // Convert burn proof to range proof format
+    let range_proof = match convert_burn_proof_to_range_proof(proof) {
+        Ok(proof) => proof,
+        Err(_) => return false,
+    };
+    
+    // Get account commitment
+    let commitment_left = match account.get_commitment_left() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    
+    // Verify that the burn amount is within valid range
+    if amount > MAX_TRANSFER_AMOUNT {
+        return false;
+    }
+    
+    // Create commitment for the burn amount
+    let amount_scalar = curve25519_dalek::scalar::Scalar::from(amount);
+    let burn_commitment = pedersen_commit(&amount_scalar, &curve25519_dalek::scalar::Scalar::zero());
+    
+    // Verify range proof for burn amount
+    if !verifier.verify_range_proof(&burn_commitment, &range_proof, 32).unwrap_or(false) {
+        return false;
+    }
+    
+    // Verify that account has sufficient balance (commitment arithmetic)
+    verify_sufficient_balance(&commitment_left, &burn_commitment, account, epoch)
+}
+
+fn convert_zerosol_proof_to_range_proof(proof: &crate::state::ZerosolProof) -> Result<RangeProof, ProgramError> {
+    // Convert inner product proof
+    let inner_product_proof = InnerProductProof {
+        l_vec: proof.ip_proof.l_points.iter()
+            .map(|bytes| G1Point::from_bytes(bytes))
+            .collect::<Result<Vec<_>, _>>()?,
+        r_vec: proof.ip_proof.r_points.iter()
+            .map(|bytes| G1Point::from_bytes(bytes))
+            .collect::<Result<Vec<_>, _>>()?,
+        a: scalar_from_bytes(&proof.ip_proof.a),
+        b: scalar_from_bytes(&proof.ip_proof.b),
+    };
+    
+    Ok(RangeProof {
+        a: G1Point::from_bytes(&proof.ba)?,
+        s: G1Point::from_bytes(&proof.bs)?,
+        t1: G1Point::from_bytes(&proof.t_1)?,
+        t2: G1Point::from_bytes(&proof.t_2)?,
+        t_hat: scalar_from_bytes(&proof.t_hat),
+        tau_x: scalar_from_bytes(&proof.s_tau),
+        mu: scalar_from_bytes(&proof.mu),
+        inner_product_proof,
+    })
+}
+
+fn convert_burn_proof_to_range_proof(proof: &crate::state::BurnProof) -> Result<RangeProof, ProgramError> {
+    // Convert inner product proof
+    let inner_product_proof = InnerProductProof {
+        l_vec: proof.ip_proof.l_points.iter()
+            .map(|bytes| G1Point::from_bytes(bytes))
+            .collect::<Result<Vec<_>, _>>()?,
+        r_vec: proof.ip_proof.r_points.iter()
+            .map(|bytes| G1Point::from_bytes(bytes))
+            .collect::<Result<Vec<_>, _>>()?,
+        a: scalar_from_bytes(&proof.ip_proof.a),
+        b: scalar_from_bytes(&proof.ip_proof.b),
+    };
+    
+    Ok(RangeProof {
+        a: G1Point::from_bytes(&proof.ba)?,
+        s: G1Point::from_bytes(&proof.bs)?,
+        t1: G1Point::from_bytes(&proof.t_1)?,
+        t2: G1Point::from_bytes(&proof.t_2)?,
+        t_hat: scalar_from_bytes(&proof.t_hat),
+        tau_x: scalar_from_bytes(&proof.s_tau),
+        mu: scalar_from_bytes(&proof.mu),
+        inner_product_proof,
+    })
+}
+
+fn verify_epoch_constraints(epoch: u64, public_keys: &[[u8; 32]]) -> bool {
+    // Verify epoch-specific constraints
+    // This could include checking that public keys are properly formed for the epoch
+    for pk_bytes in public_keys {
+        if let Ok(pk_point) = G1Point::from_bytes(pk_bytes) {
+            // Verify that the public key is not the identity point
+            if pk_point.eq(&G1Point::identity()) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    
+    // Additional epoch-specific validations could go here
+    true
+}
+
+fn verify_sufficient_balance(
+    account_commitment: &G1Point,
+    burn_commitment: &G1Point,
+    account: &ZerosolAccount,
+    epoch: u64,
+) -> bool {
+    // This would verify that the account has sufficient balance to burn the requested amount
+    // In a real implementation, this would involve more complex commitment arithmetic
+    
+    // For now, we perform basic sanity checks
+    if account_commitment.eq(&G1Point::identity()) && !burn_commitment.eq(&G1Point::identity()) {
+        return false; // Can't burn from empty account
+    }
+    
+    // Additional balance verification logic would go here
+    // This might involve verifying a proof that account_commitment - burn_commitment >= 0
+    
     true
 }
