@@ -11,6 +11,7 @@ pub mod processor;
 pub mod state;
 pub mod utils;
 pub mod bulletproof;
+pub mod curve_ops;
 
 entrypoint!(process_instruction);
 
@@ -19,5 +20,8 @@ pub fn process_instruction(
     accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
+    // Initialize optimized curve operations on first use
+    utils::init_optimized_curve_ops();
+    
     processor::process_instruction(program_id, accounts, instruction_data)
 }

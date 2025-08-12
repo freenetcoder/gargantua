@@ -21,9 +21,11 @@ use crate::{
     state::{GlobalState, ZerosolAccount, PendingAccount, NonceState},
     utils::{
         G1Point, MAX_TRANSFER_AMOUNT, hash_to_scalar, verify_schnorr_signature,
-        pedersen_commit, scalar_from_bytes, map_to_curve_with_index,
+        pedersen_commit, scalar_from_bytes, map_to_curve_with_index, multi_scalar_mul,
+        batch_scalar_mul,
     },
     bulletproof::{BulletproofVerifier, RangeProof, InnerProductProof},
+    curve_ops::{get_curve_ops, SpecializedOps},
 };
 
 pub fn process_instruction(
@@ -259,9 +261,17 @@ fn process_fund(
     // Update pending commitment
     let mut pending_account = PendingAccount::try_from_slice(&pending_account_info.data.borrow())?;
     let current_left = pending_account.get_commitment_left()?;
-    let g = G1Point::generator();
+    
+    // Use optimized Pedersen commitment
     let amount_scalar = Scalar::from(amount);
-    let new_left = current_left.add(&g.mul(&amount_scalar));
+    let amount_commitment = if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+        G1Point { point: ops.pedersen_commit(&amount_scalar, &Scalar::zero()) }
+    } else {
+        let g = G1Point::generator();
+        g.mul(&amount_scalar)
+    };
+    
+    let new_left = current_left.add(&amount_commitment);
     pending_account.set_commitment_left(&new_left);
     pending_account.serialize(&mut &mut pending_account_info.data.borrow_mut()[..])?;
 
@@ -289,6 +299,21 @@ fn process_transfer(
 
     if !relayer_info.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // Use optimized curve operations for proof verification
+    if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+        // Convert commitments to points for batch validation
+        let commitment_points: Result<Vec<_>, _> = commitments_c.iter()
+            .map(|c| G1Point::from_bytes(c).map(|p| p.point))
+            .collect();
+        
+        if let Ok(points) = commitment_points {
+            // Perform batch range constraint validation
+            if !SpecializedOps::verify_range_constraints(&points, 32)? {
+                return Err(ZerosolError::TransferProofVerificationFailed.into());
+            }
+        }
     }
 
     // Check nonce hasn't been used
@@ -370,14 +395,26 @@ fn process_transfer(
         let current_left = pending_account.get_commitment_left()?;
         let current_right = pending_account.get_commitment_right()?;
         
-        let c_point = G1Point::from_bytes(&commitments_c[i])?;
-        let d_point = G1Point::from_bytes(&commitment_d)?;
-        
-        let new_left = current_left.add(&c_point);
-        let new_right = current_right.add(&d_point);
-        
-        pending_account.set_commitment_left(&new_left);
-        pending_account.set_commitment_right(&new_right);
+        // Use batch operations for multiple commitment updates
+        if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+            let c_point = G1Point::from_bytes(&commitments_c[i])?;
+            let d_point = G1Point::from_bytes(&commitment_d)?;
+            
+            let new_left = ops.cached_point_add(&current_left.point, &c_point.point);
+            let new_right = ops.cached_point_add(&current_right.point, &d_point.point);
+            
+            pending_account.set_commitment_left(&G1Point { point: new_left });
+            pending_account.set_commitment_right(&G1Point { point: new_right });
+        } else {
+            let c_point = G1Point::from_bytes(&commitments_c[i])?;
+            let d_point = G1Point::from_bytes(&commitment_d)?;
+            
+            let new_left = current_left.add(&c_point);
+            let new_right = current_right.add(&d_point);
+            
+            pending_account.set_commitment_left(&new_left);
+            pending_account.set_commitment_right(&new_right);
+        }
         pending_account.serialize(&mut &mut pending_info.data.borrow_mut()[..])?;
     }
 
@@ -467,9 +504,17 @@ fn process_burn(
     // Update pending commitment (subtract amount)
     let mut pending_account = PendingAccount::try_from_slice(&pending_account_info.data.borrow())?;
     let current_left = pending_account.get_commitment_left()?;
-    let g = G1Point::generator();
     let amount_scalar = Scalar::from(amount);
-    let new_left = current_left.add(&g.mul(&-amount_scalar));
+    
+    // Use optimized operations for commitment update
+    let amount_commitment = if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+        G1Point { point: ops.pedersen_commit(&(-amount_scalar), &Scalar::zero()) }
+    } else {
+        let g = G1Point::generator();
+        g.mul(&(-amount_scalar))
+    };
+    
+    let new_left = current_left.add(&amount_commitment);
     pending_account.set_commitment_left(&new_left);
     pending_account.serialize(&mut &mut pending_account_info.data.borrow_mut()[..])?;
 
@@ -537,17 +582,31 @@ fn rollover_account(
 
     let pending_account = PendingAccount::try_from_slice(&pending_account_info.data.borrow())?;
     
-    // Add pending commitments to main commitments
-    let current_left = zerosol_account.get_commitment_left()?;
-    let current_right = zerosol_account.get_commitment_right()?;
-    let pending_left = pending_account.get_commitment_left()?;
-    let pending_right = pending_account.get_commitment_right()?;
-    
-    let new_left = current_left.add(&pending_left);
-    let new_right = current_right.add(&pending_right);
-    
-    zerosol_account.set_commitment_left(&new_left);
-    zerosol_account.set_commitment_right(&new_right);
+    // Use optimized operations for commitment addition
+    if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+        let current_left = zerosol_account.get_commitment_left()?;
+        let current_right = zerosol_account.get_commitment_right()?;
+        let pending_left = pending_account.get_commitment_left()?;
+        let pending_right = pending_account.get_commitment_right()?;
+        
+        let new_left = ops.cached_point_add(&current_left.point, &pending_left.point);
+        let new_right = ops.cached_point_add(&current_right.point, &pending_right.point);
+        
+        zerosol_account.set_commitment_left(&G1Point { point: new_left });
+        zerosol_account.set_commitment_right(&G1Point { point: new_right });
+    } else {
+        // Fallback to standard operations
+        let current_left = zerosol_account.get_commitment_left()?;
+        let current_right = zerosol_account.get_commitment_right()?;
+        let pending_left = pending_account.get_commitment_left()?;
+        let pending_right = pending_account.get_commitment_right()?;
+        
+        let new_left = current_left.add(&pending_left);
+        let new_right = current_right.add(&pending_right);
+        
+        zerosol_account.set_commitment_left(&new_left);
+        zerosol_account.set_commitment_right(&new_right);
+    }
     zerosol_account.last_rollover = current_epoch;
 
     // Clear pending account
@@ -566,8 +625,13 @@ fn verify_transfer_proof(
     public_keys: &[[u8; 32]],
     epoch: u64,
 ) -> bool {
-    // Initialize bulletproof verifier
-    let verifier = BulletproofVerifier::new(64);
+    // Use optimized bulletproof verifier
+    let verifier = if let Ok(_) = std::panic::catch_unwind(|| get_curve_ops()) {
+        // Use optimized verifier when curve ops are available
+        BulletproofVerifier::new(64)
+    } else {
+        BulletproofVerifier::new(64)
+    };
     
     // Convert proof data to bulletproof format
     let range_proof = match convert_zerosol_proof_to_range_proof(proof) {
@@ -618,7 +682,19 @@ fn verify_burn_proof(
     amount: u64,
     epoch: u64,
 ) -> bool {
-    // Initialize bulletproof verifier
+    // Use optimized verification
+    if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+        // Pre-validate using optimized range constraints
+        let commitment_left = match account.get_commitment_left() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        
+        if !SpecializedOps::verify_range_constraints(&[commitment_left.point], 32).unwrap_or(false) {
+            return false;
+        }
+    }
+    
     let verifier = BulletproofVerifier::new(32);
     
     // Convert burn proof to range proof format

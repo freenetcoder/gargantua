@@ -17,6 +17,7 @@ curve25519-dalek = "4.0"
 sha2 = "0.10"
 spl-token = "4.0"
 rand = "0.8"
+lazy_static = "1.4"
 
 [dev-dependencies]
 solana-program-test = "1.17"

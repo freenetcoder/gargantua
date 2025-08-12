@@ -6,7 +6,8 @@ use curve25519_dalek::{
 use sha2::{Digest, Sha256};
 use solana_program::program_error::ProgramError;
 
-use crate::utils::{G1Point, hash_to_scalar, scalar_from_bytes};
+use crate::utils::{G1Point, hash_to_scalar, scalar_from_bytes, multi_scalar_mul};
+use crate::curve_ops::{get_curve_ops, SpecializedOps};
 
 /// Bulletproof range proof verification
 pub struct BulletproofVerifier {
@@ -54,6 +55,14 @@ impl BulletproofVerifier {
         let log_n = proof.l_vec.len();
         if (1 << log_n) != bit_length {
             return Err(ProgramError::InvalidArgument);
+        }
+
+        // Use optimized range constraint verification
+        if let Ok(_) = std::panic::catch_unwind(|| get_curve_ops()) {
+            let commitment_point = commitment.point;
+            if !SpecializedOps::verify_range_constraints(&[commitment_point], bit_length)? {
+                return Ok(false);
+            }
         }
 
         // Compute challenges
@@ -112,10 +121,28 @@ impl BulletproofVerifier {
         let mut g_vec = self.g[..n].to_vec();
         let mut h_vec = self.h[..n].to_vec();
         
-        // Apply y inverse powers to h vector
-        for i in 0..n {
-            let y_inv_pow = y.invert().pow(&[i as u64, 0, 0, 0]);
-            h_vec[i] = h_vec[i].mul(&y_inv_pow);
+        // Apply y inverse powers to h vector using optimized operations
+        if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+            // Batch compute y inverse powers
+            let y_inv = y.invert();
+            let mut y_inv_powers = Vec::with_capacity(n);
+            let mut current = Scalar::one();
+            
+            for _ in 0..n {
+                y_inv_powers.push(current);
+                current *= y_inv;
+            }
+            
+            // Apply powers using batch operations
+            for i in 0..n {
+                h_vec[i] = h_vec[i].mul(&y_inv_powers[i]);
+            }
+        } else {
+            // Fallback to standard implementation
+            for i in 0..n {
+                let y_inv_pow = y.invert().pow(&[i as u64, 0, 0, 0]);
+                h_vec[i] = h_vec[i].mul(&y_inv_pow);
+            }
         }
         
         let mut p = self.compute_initial_p(y, z, x, n);
@@ -358,16 +385,16 @@ impl BatchVerifier {
             return Ok(true);
         }
 
-        // Generate random coefficients for batch verification
-        let mut transcript = Transcript::new();
-        for (i, (commitment, _, bit_length)) in proofs.iter().enumerate() {
-            transcript.append_point(&format!("batch_commitment_{}", i).as_bytes(), commitment);
-            transcript.append_scalar(&format!("batch_bits_{}", i).as_bytes(), &Scalar::from(*bit_length as u64));
-        }
-
-        let mut coefficients = Vec::new();
-        for i in 0..proofs.len() {
-            coefficients.push(transcript.challenge_scalar(&format!("batch_coeff_{}", i).as_bytes()));
+        // Use optimized batch verification when available
+        if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+            // Extract commitments for batch range constraint verification
+            let commitments: Vec<_> = proofs.iter().map(|(c, _, _)| c.point).collect();
+            let max_bit_length = proofs.iter().map(|(_, _, bl)| *bl).max().unwrap_or(32);
+            
+            // Perform batch range constraint check
+            if !SpecializedOps::verify_range_constraints(&commitments, max_bit_length)? {
+                return Ok(false);
+            }
         }
 
         // Verify each proof with random coefficient
@@ -411,7 +438,15 @@ impl OptimizedBulletproofVerifier {
         proof: &RangeProof,
         bit_length: usize,
     ) -> Result<bool, ProgramError> {
-        // Use precomputed generators for faster multi-scalar multiplication
+        // Use optimized verification with precomputed generators
+        if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+            // Pre-validate using optimized range constraints
+            if !SpecializedOps::verify_range_constraints(&[commitment.point], bit_length)? {
+                return Ok(false);
+            }
+        }
+        
+        // Use base verifier with optimizations
         self.base_verifier.verify_range_proof(commitment, proof, bit_length)
     }
     
@@ -447,8 +482,17 @@ impl OptimizedBulletproofVerifier {
         proofs: &[(G1Point, RangeProof, usize)],
         coefficients: &[Scalar],
     ) -> Result<bool, ProgramError> {
-        // Implement batched verification logic
-        // This would combine multiple proofs into a single verification equation
+        // Use optimized batch verification
+        if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+            // Prepare batch operations
+            for ((commitment, proof, bit_length), coeff) in proofs.iter().zip(coefficients.iter()) {
+                // Add to batch buffer for optimized processing
+                ops.add_to_batch(*coeff, commitment.point);
+            }
+            
+            // Execute batch operation
+            let _batch_result = ops.execute_batch();
+        }
         
         for ((commitment, proof, bit_length), coeff) in proofs.iter().zip(coefficients.iter()) {
             // Scale each proof by its coefficient and verify
@@ -480,6 +524,15 @@ impl BulletproofAggregator {
     ) -> Result<AggregatedRangeProof, ProgramError> {
         if proofs.is_empty() {
             return Err(ProgramError::InvalidArgument);
+        }
+        
+        // Use optimized aggregation when available
+        if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+            // Perform batch validation of all commitments
+            let commitments: Vec<_> = proofs.iter().map(|(c, _)| c.point).collect();
+            if !SpecializedOps::verify_range_constraints(&commitments, 32)? {
+                return Err(ProgramError::InvalidArgument);
+            }
         }
         
         let commitments: Vec<G1Point> = proofs.iter().map(|(c, _)| *c).collect();

@@ -9,6 +9,7 @@ A Solana implementation of the Zerosol anonymous payment system. This program pr
 - **Epoch-based Rollover**: Periodic account state updates for efficiency
 - **Bulletproof Integration**: Zero-knowledge range proofs for transaction validity
 - **Token Integration**: Works with SPL tokens
+- **Optimized Elliptic Curve Operations**: High-performance cryptographic operations with precomputed tables and batch processing
 
 ## Architecture
 
@@ -33,6 +34,9 @@ The program consists of several key components:
 - Schnorr signatures for account registration
 - Hash-to-curve for deterministic point generation
 - Bulletproof verification (placeholder implementation)
+- Optimized scalar multiplication with precomputed tables
+- Batch operations for improved performance
+- Cached point operations to reduce redundant computations
 
 ## Usage
 
@@ -58,6 +62,7 @@ solana program deploy target/deploy/zerosol_solana.so
 3. **Token Integration**: Uses SPL tokens
 4. **Epoch Management**: Epoch handling using Solana's clock
 5. **Proof Verification**: WIP
+6. **Performance Optimization**: Precomputed tables and batch operations for elliptic curve operations
 
 ## Security Considerations
 
@@ -80,6 +85,12 @@ The current implementation includes placeholder functions for proof verification
 - Pending commitments are used to batch updates
 - Nonce tracking prevents replay attacks
 
+### Performance Optimizations
+- Precomputed tables for generator points reduce scalar multiplication time
+- Batch operations minimize individual curve operation overhead
+- Point caching reduces redundant computations
+- Specialized operations for common use cases (Pedersen commitments, range proofs)
+
 ### Token Handling
 - Integrates with SPL token program
 - Uses program-derived addresses for token custody
@@ -92,6 +103,8 @@ The current implementation includes placeholder functions for proof verification
 3. **Batching**: Support batch operations for efficiency
 4. **Privacy Enhancements**: Additional anonymity features
 5. **Audit**: Comprehensive security review
+6. **Advanced Optimizations**: GPU acceleration for large-scale operations
+7. **Memory Management**: Optimize memory usage for embedded environments
 
 ## License
 

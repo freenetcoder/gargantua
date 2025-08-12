@@ -2,9 +2,11 @@ use curve25519_dalek::{
     constants::RISTRETTO_BASEPOINT_POINT,
     ristretto::{RistrettoPoint, CompressedRistretto},
     scalar::Scalar,
+    traits::VartimeMultiscalarMul,
 };
 use sha2::{Digest, Sha256};
 use solana_program::program_error::ProgramError;
+use crate::curve_ops::{get_curve_ops, get_precomputed_constants, init_curve_ops};
 
 pub const GROUP_ORDER: [u8; 32] = [
     0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -38,14 +40,28 @@ impl G1Point {
     }
 
     pub fn add(&self, other: &G1Point) -> G1Point {
-        G1Point {
-            point: self.point + other.point,
+        // Use optimized operations when available
+        if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+            G1Point {
+                point: ops.cached_point_add(&self.point, &other.point),
+            }
+        } else {
+            G1Point {
+                point: self.point + other.point,
+            }
         }
     }
 
     pub fn mul(&self, scalar: &Scalar) -> G1Point {
-        G1Point {
-            point: self.point * scalar,
+        // Use optimized scalar multiplication when available
+        if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+            G1Point {
+                point: ops.fast_scalar_mul(&self.point, scalar),
+            }
+        } else {
+            G1Point {
+                point: self.point * scalar,
+            }
         }
     }
 
@@ -122,9 +138,16 @@ pub fn map_to_curve_with_index(input: &str, index: u64) -> G1Point {
 
 // Pedersen commitment: g^value * h^blinding
 pub fn pedersen_commit(value: &Scalar, blinding: &Scalar) -> G1Point {
-    let g = G1Point::generator();
-    let h = get_h_generator();
-    g.mul(value).add(&h.mul(blinding))
+    // Use optimized Pedersen commitment when available
+    if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+        G1Point {
+            point: ops.pedersen_commit(value, blinding),
+        }
+    } else {
+        let g = G1Point::generator();
+        let h = get_h_generator();
+        g.mul(value).add(&h.mul(blinding))
+    }
 }
 
 pub fn get_h_generator() -> G1Point {
@@ -160,11 +183,27 @@ pub fn verify_schnorr_signature(
 pub fn multi_scalar_mul(scalars: &[Scalar], points: &[G1Point]) -> G1Point {
     assert_eq!(scalars.len(), points.len());
     
-    let mut result = G1Point::identity();
-    for (scalar, point) in scalars.iter().zip(points.iter()) {
-        result = result.add(&point.mul(scalar));
+    // Use optimized multi-scalar multiplication when available
+    if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+        let ristretto_points: Vec<RistrettoPoint> = points.iter().map(|p| p.point).collect();
+        match ops.linear_combination(scalars, &ristretto_points) {
+            Ok(result_point) => G1Point { point: result_point },
+            Err(_) => {
+                // Fallback to standard implementation
+                let mut result = G1Point::identity();
+                for (scalar, point) in scalars.iter().zip(points.iter()) {
+                    result = result.add(&point.mul(scalar));
+                }
+                result
+            }
+        }
+    } else {
+        let mut result = G1Point::identity();
+        for (scalar, point) in scalars.iter().zip(points.iter()) {
+            result = result.add(&point.mul(scalar));
+        }
+        result
     }
-    result
 }
 
 /// Compute inner product of two scalar vectors
@@ -180,6 +219,27 @@ pub fn inner_product(a: &[Scalar], b: &[Scalar]) -> Scalar {
 
 /// Generate powers of a scalar: [1, x, x^2, ..., x^(n-1)]
 pub fn scalar_powers(x: &Scalar, n: usize) -> Vec<Scalar> {
+    // Use precomputed powers of 2 when possible
+    if *x == Scalar::from(2u64) {
+        if let Ok(constants) = std::panic::catch_unwind(|| get_precomputed_constants()) {
+            let mut powers = Vec::with_capacity(n);
+            for i in 0..n {
+                if let Some(power) = constants.power_of_two(i) {
+                    powers.push(power);
+                } else {
+                    // Fallback for large powers
+                    let mut current = Scalar::one();
+                    for _ in 0..i {
+                        current = current + current;
+                    }
+                    powers.push(current);
+                }
+            }
+            return powers;
+        }
+    }
+    
+    // Standard implementation
     let mut powers = Vec::with_capacity(n);
     let mut current = Scalar::one();
     
@@ -214,5 +274,45 @@ pub fn vector_sub(a: &[Scalar], b: &[Scalar]) -> Vec<Scalar> {
 
 /// Scalar multiplication of a vector
 pub fn vector_scalar_mul(v: &[Scalar], s: &Scalar) -> Vec<Scalar> {
+    // Use precomputed small scalars when possible
+    if let Ok(constants) = std::panic::catch_unwind(|| get_precomputed_constants()) {
+        if let Some(small_s) = (0..16).find(|&i| constants.small_scalar(i).map_or(false, |sc| sc == *s)) {
+            if small_s == 0 {
+                return vec![Scalar::zero(); v.len()];
+            } else if small_s == 1 {
+                return v.to_vec();
+            }
+        }
+    }
+    
     v.iter().map(|vi| vi * s).collect()
+}
+
+/// Optimized batch scalar multiplication
+pub fn batch_scalar_mul(scalars: &[Scalar], points: &[G1Point]) -> Vec<G1Point> {
+    assert_eq!(scalars.len(), points.len());
+    
+    if let Ok(ops) = std::panic::catch_unwind(|| get_curve_ops()) {
+        // Use batch operations for better performance
+        let mut results = Vec::with_capacity(scalars.len());
+        
+        for (scalar, point) in scalars.iter().zip(points.iter()) {
+            results.push(G1Point {
+                point: ops.fast_scalar_mul(&point.point, scalar),
+            });
+        }
+        
+        results
+    } else {
+        // Fallback to standard implementation
+        scalars.iter()
+            .zip(points.iter())
+            .map(|(scalar, point)| point.mul(scalar))
+            .collect()
+    }
+}
+
+/// Initialize optimized curve operations
+pub fn init_optimized_curve_ops() {
+    init_curve_ops();
 }
