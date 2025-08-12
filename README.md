@@ -176,7 +176,6 @@ async fn main() -> Result<()> {
 - [**Protocol Specification**](./docs/PROTOCOL.md) - Technical protocol details
 - [**Security Analysis**](./docs/SECURITY.md) - Cryptographic security proofs
 - [**Integration Guide**](./docs/INTEGRATION.md) - How to integrate Gargantua
-- [**Examples**](./examples/) - Code examples and tutorials
 
 ## 🔐 Security
 
