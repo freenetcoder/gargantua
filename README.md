@@ -6,7 +6,6 @@
   [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
   [![Solana](https://img.shields.io/badge/Solana-Compatible-green.svg)](https://solana.com)
   [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org)
-  [![Security](https://img.shields.io/badge/Security-Audited-brightgreen.svg)](#security)
 </div>
 
 ## 🌌 Overview
